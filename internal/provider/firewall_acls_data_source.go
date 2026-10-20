@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -30,6 +31,7 @@ type firewallACLItemModel struct {
 	Name    types.String `tfsdk:"name"`
 	Enabled types.Bool   `tfsdk:"enabled"`
 	Policy  types.Int64  `tfsdk:"policy"`
+	Index   types.Int64  `tfsdk:"index"`
 }
 
 type firewallACLsDataSourceModel struct {
@@ -76,6 +78,9 @@ func (d *firewallACLsDataSource) Schema(_ context.Context, _ datasource.SchemaRe
 						"name":    schema.StringAttribute{Computed: true, MarkdownDescription: "The rule name."},
 						"enabled": schema.BoolAttribute{Computed: true, MarkdownDescription: "Whether the rule is enabled."},
 						"policy":  schema.Int64Attribute{Computed: true, MarkdownDescription: "Policy: 0=deny, 1=permit."},
+						"index": schema.Int64Attribute{Computed: true, MarkdownDescription: "1-based position in this type's evaluation order. " +
+							"Omada evaluates top to bottom and the first match wins, so this is what decides which of two overlapping rules applies. " +
+							"Set it with `omada_firewall_acl_order`; it cannot be set on the rule itself."},
 					},
 				},
 			},
@@ -119,6 +124,8 @@ func (d *firewallACLsDataSource) Read(ctx context.Context, req datasource.ReadRe
 			resp.Diagnostics.AddError(fmt.Sprintf("Unable to list %s ACLs", t.name), err.Error())
 			return
 		}
+		// Listed in evaluation order, so reading the list IS reading the order.
+		sort.SliceStable(acls, func(i, j int) bool { return acls[i].Index < acls[j].Index })
 		for _, a := range acls {
 			state.ACLs = append(state.ACLs, firewallACLItemModel{
 				ID:      types.StringValue(a.ID),
@@ -126,6 +133,7 @@ func (d *firewallACLsDataSource) Read(ctx context.Context, req datasource.ReadRe
 				Name:    types.StringValue(a.Name),
 				Enabled: types.BoolValue(a.Status),
 				Policy:  types.Int64Value(int64(a.Policy)),
+				Index:   types.Int64Value(int64(a.Index)),
 			})
 		}
 	}

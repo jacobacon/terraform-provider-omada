@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	pathpkg "path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -456,9 +457,35 @@ func newMockController(t *testing.T) *httptest.Server {
 	// something to list; the resource tests only assert on rules they create.
 	acls := map[string]map[string]any{
 		"acl-seed": {"id": "acl-seed", "type": 0 /* gateway */, "name": "seed",
-			"status": true, "policy": 1},
+			"status": true, "policy": 1, "index": 1},
 	}
 	aclNext := 1
+	// Rules of a type carry contiguous 1-based indexes. A create appends, and a
+	// delete closes the gap -- both true of the real controller, and the append
+	// is the whole reason omada_firewall_acl_order exists.
+	aclReindex := func(aclType int) {
+		ofType := make([]map[string]any, 0, len(acls))
+		for _, a := range acls {
+			if toInt(a["type"]) == aclType {
+				ofType = append(ofType, a)
+			}
+		}
+		sort.SliceStable(ofType, func(i, j int) bool {
+			return toInt(ofType[i]["index"]) < toInt(ofType[j]["index"])
+		})
+		for i, a := range ofType {
+			a["index"] = i + 1
+		}
+	}
+	aclMaxIndex := func(aclType int) int {
+		max := 0
+		for _, a := range acls {
+			if toInt(a["type"]) == aclType && toInt(a["index"]) > max {
+				max = toInt(a["index"])
+			}
+		}
+		return max
+	}
 	const aclBase = "/abc123/api/v2/sites/site-1/setting/firewall/acls"
 	mux.HandleFunc(aclBase, func(w http.ResponseWriter, r *http.Request) {
 		if !requireToken(w, r) {
@@ -473,6 +500,7 @@ func newMockController(t *testing.T) *httptest.Server {
 			id := fmt.Sprintf("acl-%d", aclNext)
 			aclNext++
 			in["id"] = id
+			in["index"] = aclMaxIndex(toInt(in["type"])) + 1 // appends, like the controller
 			acls[id] = in
 			writeEnvelope(w, 0, "", nil)
 		default: // GET — filter by ?type=N like the real controller
@@ -496,15 +524,88 @@ func newMockController(t *testing.T) *httptest.Server {
 		defer mu.Unlock()
 		switch r.Method {
 		case http.MethodDelete:
-			delete(acls, id)
+			if old, ok := acls[id]; ok {
+				t := toInt(old["type"])
+				delete(acls, id)
+				aclReindex(t)
+			}
 			writeEnvelope(w, 0, "", nil)
 		default: // PUT
 			var in map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&in)
 			in["id"] = id
+			// The rule's own PUT accepts an `index` and SILENTLY IGNORES it --
+			// returning success while the rule does not move. Reproduced here so
+			// that anyone "simplifying" the order resource into this endpoint
+			// fails in CI rather than on a live network.
+			if old, ok := acls[id]; ok {
+				in["index"] = old["index"]
+			}
 			acls[id] = in
 			writeEnvelope(w, 0, "", in)
 		}
+	})
+
+	// POST /cmd/acls/modifyIndex -- the ONLY way to reorder ACL rules.
+	//
+	// Note the /cmd/ namespace: nothing under /setting/firewall/acls reorders
+	// anything. This mock enforces the real controller's validation, measured on
+	// a live v6.2 controller, because every one of these rules shapes the client:
+	//
+	//   * it is a PERMUTATION, not an insert. The multiset of submitted indexes
+	//     must equal the multiset the named rules already hold, so {A:1} for a
+	//     rule at index 8 is refused -- you cannot move a rule to a position
+	//     held by a rule you did not name.
+	//   * a partial map is fine; unnamed rules do not move.
+	//   * an unknown id, a duplicate index, or an out-of-range index all return
+	//     -1001 "Invalid request parameters." with NOTHING applied. The whole
+	//     payload is validated first, so a rejected call cannot half-apply.
+	mux.HandleFunc("/abc123/api/v2/sites/site-1/cmd/acls/modifyIndex", func(w http.ResponseWriter, r *http.Request) {
+		if !requireToken(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeEnvelope(w, -1600, "Unsupported request path.", nil)
+			return
+		}
+		var in struct {
+			Type    int            `json:"type"`
+			Indexes map[string]int `json:"indexes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || len(in.Indexes) == 0 {
+			writeEnvelope(w, -1001, "Invalid request parameters.", nil)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+
+		held := make([]int, 0, len(in.Indexes))
+		for id := range in.Indexes {
+			a, ok := acls[id]
+			if !ok || toInt(a["type"]) != in.Type {
+				writeEnvelope(w, -1001, "Invalid request parameters.", nil) // unknown id
+				return
+			}
+			held = append(held, toInt(a["index"]))
+		}
+		want := make([]int, 0, len(in.Indexes))
+		for _, idx := range in.Indexes {
+			want = append(want, idx)
+		}
+		sort.Ints(held)
+		sort.Ints(want)
+		for i := range held {
+			if held[i] != want[i] {
+				// Covers a duplicate index, an out-of-range index, and any
+				// attempt to claim a position a named rule does not hold.
+				writeEnvelope(w, -1001, "Invalid request parameters.", nil)
+				return
+			}
+		}
+		for id, idx := range in.Indexes {
+			acls[id]["index"] = idx
+		}
+		writeEnvelope(w, 0, "Success.", nil)
 	})
 
 	// Stateful WLAN-group store (POST create, GET list, PATCH /{id}, DELETE).
@@ -2752,6 +2853,22 @@ func rawStore(t *testing.T, base, kind string) map[string]map[string]any {
 func validPortForwardProtocol(v any) bool {
 	n, ok := v.(float64)
 	return ok && n >= 0 && n <= 2
+}
+
+// toInt coerces a value decoded from JSON into an int. JSON numbers arrive as
+// float64 through map[string]any, while values the mock set itself are already
+// int, so both have to be handled.
+func toInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	}
+	return 0
 }
 
 func writeEnvelope(w http.ResponseWriter, code int, msg string, result any) {

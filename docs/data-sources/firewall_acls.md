@@ -40,6 +40,7 @@ Read-Only:
 
 - `enabled` (Boolean) Whether the rule is enabled.
 - `id` (String) The rule ID (use this to import `omada_firewall_acl`).
+- `index` (Number) 1-based position in this type's evaluation order. Omada evaluates top to bottom and the first match wins, so this is what decides which of two overlapping rules applies. Set it with `omada_firewall_acl_order`; it cannot be set on the rule itself.
 - `name` (String) The rule name.
 - `policy` (Number) Policy: 0=deny, 1=permit.
 - `type` (String) ACL type: `gateway`, `switch`, or `eap`.
