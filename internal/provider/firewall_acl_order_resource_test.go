@@ -61,6 +61,8 @@ resource "omada_firewall_acl_order" "gateway" {
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("omada_firewall_acl_order.gateway", "type", "gateway"),
 					resource.TestCheckResourceAttr("omada_firewall_acl_order.gateway", "site_id", "site-1"),
+					// The canonical site name is recorded even when unset (§2.7a).
+					resource.TestCheckResourceAttr("omada_firewall_acl_order.gateway", "site", "Default"),
 					resource.TestCheckResourceAttr("omada_firewall_acl_order.gateway", "id", "site-1/gateway"),
 					resource.TestCheckResourceAttr("omada_firewall_acl_order.gateway", "rule_ids.#", "3"),
 					// The order read back from the controller, not just echoed
@@ -127,6 +129,64 @@ resource "omada_firewall_acl_order" "gateway" {
   rule_ids = ["acl-seed", "acl-does-not-exist"]
 }`,
 				ExpectError: regexp.MustCompile(`acl "acl-does-not-exist" not found`),
+			},
+		},
+	})
+}
+
+// TestAccFirewallACLOrderImportWithoutSitePrefix pins DESIGN.md §2.7a for this
+// resource: a bare import id must not leave site null, or a configuration that
+// names its site would plan a replacement of what it just imported.
+func TestAccFirewallACLOrderImportWithoutSitePrefix(t *testing.T) {
+	srv := newMockController(t)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testProviderConfig(srv.URL) + `
+resource "omada_firewall_acl_order" "gateway" {
+  site     = "Default"
+  rule_ids = ["acl-seed"]
+}`,
+			},
+			{
+				ResourceName: "omada_firewall_acl_order.gateway",
+				ImportState:  true,
+				// Deliberately bare: no "<site>/" prefix.
+				ImportStateId:           "gateway",
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"rule_ids"},
+			},
+		},
+	})
+}
+
+// TestAccFirewallACLOrderResource_UnverifiedType keeps switch and EAP out until
+// modifyIndex has been exercised for them on a live controller.
+func TestAccFirewallACLOrderResource_UnverifiedType(t *testing.T) {
+	srv := newMockController(t)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testProviderConfig(srv.URL) + `
+resource "omada_firewall_acl_order" "switch" {
+  type     = "switch"
+  rule_ids = ["acl-seed"]
+}`,
+				ExpectError: regexp.MustCompile(`(?s)value must be one of:.*"gateway"`),
+			},
+			{
+				Config: testProviderConfig(srv.URL) + `
+resource "omada_firewall_acl_order" "switch" {
+  rule_ids = ["acl-seed"]
+}`,
+				ResourceName:  "omada_firewall_acl_order.switch",
+				ImportState:   true,
+				ImportStateId: "switch",
+				ExpectError:   regexp.MustCompile(`Invalid import ID`),
 			},
 		},
 	})

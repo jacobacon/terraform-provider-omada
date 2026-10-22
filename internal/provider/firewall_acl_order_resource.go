@@ -6,10 +6,12 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -31,6 +33,12 @@ var (
 func NewFirewallACLOrderResource() resource.Resource {
 	return &firewallACLOrderResource{}
 }
+
+// orderableACLTypes are the ACL types whose ordering has been verified on a live
+// controller. modifyIndex takes a numeric type and switch (1) and EAP (2) are
+// presumably accepted, but only gateway (0) has been exercised; widen this once
+// the others have been, rather than shipping an ordering nobody has watched move.
+var orderableACLTypes = []string{"gateway"}
 
 type firewallACLOrderResource struct {
 	data *providerData
@@ -72,18 +80,24 @@ func (r *firewallACLOrderResource) Schema(_ context.Context, _ resource.SchemaRe
 			"site": schema.StringAttribute{
 				MarkdownDescription: "Site name. Defaults to the primary site. Changing this forces replacement.",
 				Optional:            true,
-				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
+				Computed:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(), stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"site_id": schema.StringAttribute{
 				Computed:      true,
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"type": schema.StringAttribute{
-				MarkdownDescription: "ACL type: `gateway`, `switch`, or `eap`. Changing forces replacement.",
-				Optional:            true,
-				Computed:            true,
-				Default:             stringdefault.StaticString("gateway"),
-				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
+				MarkdownDescription: "ACL type. Only `gateway` is accepted: `modifyIndex` has been verified " +
+					"live for gateway ACLs only, and switch and EAP ACLs are not yet supported. " +
+					"Changing forces replacement.",
+				Optional:      true,
+				Computed:      true,
+				Default:       stringdefault.StaticString("gateway"),
+				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+				Validators:    []validator.String{stringvalidator.OneOf(orderableACLTypes...)},
 			},
 			"rule_ids": schema.ListAttribute{
 				MarkdownDescription: "ACL rule IDs in the order they should be evaluated, first match first. " +
@@ -130,7 +144,8 @@ func (r *firewallACLOrderResource) aclType(m firewallACLOrderModel) (int, bool) 
 // that is all this resource controls. Any id that is no longer on the controller
 // is dropped, which surfaces as a diff against the configuration rather than a
 // silent success.
-func (r *firewallACLOrderResource) apply(ctx context.Context, siteID string, aclType int, m *firewallACLOrderModel) error {
+func (r *firewallACLOrderResource) apply(ctx context.Context, site omada.Site, aclType int, m *firewallACLOrderModel) error {
+	siteID := site.ID
 	want, diags := stringSlice(ctx, m.RuleIDs)
 	if diags.HasError() {
 		return fmt.Errorf("reading rule_ids from state")
@@ -160,6 +175,7 @@ func (r *firewallACLOrderResource) apply(ctx context.Context, siteID string, acl
 		return fmt.Errorf("building rule_ids")
 	}
 	m.RuleIDs = lv
+	m.Site = types.StringValue(site.Name)
 	m.SiteID = types.StringValue(siteID)
 	if s, ok := aclTypeToStr[aclType]; ok {
 		m.Type = types.StringValue(s)
@@ -169,23 +185,23 @@ func (r *firewallACLOrderResource) apply(ctx context.Context, siteID string, acl
 }
 
 // reorder is Create and Update: both just assert the configured order.
-func (r *firewallACLOrderResource) reorder(ctx context.Context, plan *firewallACLOrderModel) (string, int, error) {
-	siteID, err := r.data.client.ResolveSiteID(ctx, r.siteName(*plan))
+func (r *firewallACLOrderResource) reorder(ctx context.Context, plan *firewallACLOrderModel) (omada.Site, int, error) {
+	site, err := r.data.client.ResolveSite(ctx, r.siteName(*plan))
 	if err != nil {
-		return "", 0, fmt.Errorf("unable to resolve site: %w", err)
+		return omada.Site{}, 0, fmt.Errorf("unable to resolve site: %w", err)
 	}
 	aclType, ok := r.aclType(*plan)
 	if !ok {
-		return "", 0, fmt.Errorf("type must be gateway, switch, or eap")
+		return omada.Site{}, 0, fmt.Errorf("type must be one of %v", orderableACLTypes)
 	}
 	ids, diags := stringSlice(ctx, plan.RuleIDs)
 	if diags.HasError() {
-		return "", 0, fmt.Errorf("unable to read rule_ids")
+		return omada.Site{}, 0, fmt.Errorf("unable to read rule_ids")
 	}
-	if err := r.data.client.ReorderACLs(ctx, siteID, aclType, ids); err != nil {
-		return "", 0, err
+	if err := r.data.client.ReorderACLs(ctx, site.ID, aclType, ids); err != nil {
+		return omada.Site{}, 0, err
 	}
-	return siteID, aclType, nil
+	return site, aclType, nil
 }
 
 func (r *firewallACLOrderResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -194,12 +210,12 @@ func (r *firewallACLOrderResource) Create(ctx context.Context, req resource.Crea
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	siteID, aclType, err := r.reorder(ctx, &plan)
+	site, aclType, err := r.reorder(ctx, &plan)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to order ACL rules", err.Error())
 		return
 	}
-	if err := r.apply(ctx, siteID, aclType, &plan); err != nil {
+	if err := r.apply(ctx, site, aclType, &plan); err != nil {
 		resp.Diagnostics.AddError("Unable to read back ACL order", err.Error())
 		return
 	}
@@ -212,19 +228,16 @@ func (r *firewallACLOrderResource) Read(ctx context.Context, req resource.ReadRe
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	siteID := state.SiteID.ValueString()
-	if siteID == "" {
-		var err error
-		if siteID, err = r.data.client.ResolveSiteID(ctx, r.siteName(state)); err != nil {
-			resp.Diagnostics.AddError("Unable to resolve site", err.Error())
-			return
-		}
+	site, err := r.data.client.ResolveSite(ctx, r.siteName(state))
+	if err != nil {
+		resp.Diagnostics.AddError("Unable to resolve site", err.Error())
+		return
 	}
 	aclType, ok := r.aclType(state)
 	if !ok {
 		aclType = omada.ACLTypeGateway
 	}
-	if err := r.apply(ctx, siteID, aclType, &state); err != nil {
+	if err := r.apply(ctx, site, aclType, &state); err != nil {
 		resp.Diagnostics.AddError("Unable to read ACL order", err.Error())
 		return
 	}
@@ -237,12 +250,12 @@ func (r *firewallACLOrderResource) Update(ctx context.Context, req resource.Upda
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	siteID, aclType, err := r.reorder(ctx, &plan)
+	site, aclType, err := r.reorder(ctx, &plan)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to order ACL rules", err.Error())
 		return
 	}
-	if err := r.apply(ctx, siteID, aclType, &plan); err != nil {
+	if err := r.apply(ctx, site, aclType, &plan); err != nil {
 		resp.Diagnostics.AddError("Unable to read back ACL order", err.Error())
 		return
 	}
@@ -269,10 +282,10 @@ func (r *firewallACLOrderResource) ImportState(ctx context.Context, req resource
 	if parts := strings.SplitN(req.ID, "/", 2); len(parts) == 2 {
 		site, aclType = parts[0], parts[1]
 	}
-	if _, ok := aclTypeToInt[strings.ToLower(aclType)]; !ok {
+	if !slices.Contains(orderableACLTypes, strings.ToLower(aclType)) {
 		resp.Diagnostics.AddError("Invalid import ID",
-			fmt.Sprintf("expected %q or %q, where type is gateway, switch, or eap; got %q",
-				"<type>", "<site>/<type>", req.ID))
+			fmt.Sprintf("expected %q or %q, where type is one of %v; got %q",
+				"<type>", "<site>/<type>", orderableACLTypes, req.ID))
 		return
 	}
 	if site != "" {

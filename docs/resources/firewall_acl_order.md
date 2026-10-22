@@ -86,7 +86,7 @@ output "gateway_acl_order" {
 ### Optional
 
 - `site` (String) Site name. Defaults to the primary site. Changing this forces replacement.
-- `type` (String) ACL type: `gateway`, `switch`, or `eap`. Changing forces replacement.
+- `type` (String) ACL type. Only `gateway` is accepted: `modifyIndex` has been verified live for gateway ACLs only, and switch and EAP ACLs are not yet supported. Changing forces replacement.
 
 ### Read-Only
 

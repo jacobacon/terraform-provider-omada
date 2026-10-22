@@ -374,6 +374,7 @@ preserved via read-modify-write.
 | `omada_ip_group` | CRUD | live | delete path is `/groups/{type}/{id}` |
 | `omada_port_group` | CRUD | live | type-1 group; ACL ref via `*_type = 2` |
 | `omada_firewall_acl` | CRUD | live | ACL type auto-discovered on import; custom ports/devices sent empty (§5.3) |
+| `omada_firewall_acl_order` | C/I/R/U | live · gateway only | `POST /cmd/acls/modifyIndex`, a permutation of the positions the listed rules already hold; delete is a no-op; `type` restricted to `gateway` until switch/EAP are verified; the rule's own `PUT` ignores `index` (mock reproduces it) |
 | `omada_wlan_group` | CRUD | live | |
 | `omada_mdns_reflector` | CRUD | live | |
 | `omada_mdns_profile` | CRUD | live, see §5.3 | separate collection (`/setting/profiles/mdns`) from the reflector rules; controller caps custom profiles per site (5 on dev hardware), reported as `mdnsCustomMaxProfileNum` |
@@ -524,6 +525,16 @@ need only a read-only session:
   camelCase full words alone will miss those entirely, which is exactly how
   they went unfound for a while. Sweep all three casings, and try
   abbreviations.
+- **Sweep `/cmd/` as well as `/setting/`.** Actions that are not a document
+  write live in a separate namespace: ACL reordering is
+  `POST /sites/{id}/cmd/acls/modifyIndex`, and every `/setting/firewall/acls`
+  variant answers `-1600`. A sweep confined to `/setting/` reads that as "no
+  such capability" when it is only "not at that path".
+- **`errorCode 0` does not prove a field was applied.** `PUT
+  /setting/firewall/acls/{id}` accepts an `index`, answers `0 "Success."`, and
+  ignores it. Read the object back after any write you are verifying, and make
+  the mock reproduce a silent ignore like this so a later "simplification" onto
+  that endpoint fails in CI.
 - **Ask the controller what the gateway supports.**
   `GET /sites/{id}/setting/capacity` returns a feature→bool map (`oneToOneNat`,
   `disableNat`, `customAcl`, `policyRouting`, `ipsec`, …). Use it to tell "this
@@ -588,6 +599,7 @@ Every configuration endpoint found on the controller, and where it stands.
 | `/setting/transmission/bandwidthControls` | ✅ `omada_gateway_bandwidth_control` |
 | `/setting/qos/gateway/bwc` | ✅ `omada_qos_bandwidth_control` |
 | `/setting/firewall/acls` | ✅ `omada_firewall_acl` (inline ports: §5.6) |
+| `/cmd/acls/modifyIndex` | ✅ `omada_firewall_acl_order` (gateway type only) |
 | `/setting/firewall/attackdefense` | ✅ `omada_attack_defense` |
 | `/setting/firewall/macfilter` | ✅ `omada_mac_filter` (toggle only) |
 | `/setting/firewall/urlfilterings` | ❌ §5.2 — needs its query parameter |
