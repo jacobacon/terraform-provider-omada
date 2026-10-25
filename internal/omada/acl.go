@@ -211,6 +211,9 @@ func (c *Client) ReorderACLs(ctx context.Context, siteID string, aclType int, or
 		positions = append(positions, idx)
 	}
 	sort.Ints(positions)
+	if err := checkACLPositions(positions); err != nil {
+		return fmt.Errorf("acls %v on site %q (type %d): %w", orderedIDs, siteID, aclType, err)
+	}
 
 	indexes := make(map[string]int, len(orderedIDs))
 	changed := false
