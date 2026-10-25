@@ -38,6 +38,7 @@ output "networks" {
 
 Read-Only:
 
+- `builtin` (Boolean) True for the controller's primary (Default) network, which cannot be deleted.
 - `dhcp_enabled` (Boolean) Whether DHCP is enabled on the network.
 - `gateway_subnet` (String) Gateway IP + subnet in CIDR notation.
 - `id` (String) The network ID.

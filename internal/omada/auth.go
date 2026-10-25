@@ -318,3 +318,13 @@ func mfaTypeName(t int) string {
 func (c *Client) ControllerInfo(ctx context.Context) (*ControllerInfo, error) {
 	return c.info(ctx)
 }
+
+// isV5 reports whether the controller runs a 5.x release. A few writes need a
+// different body or route there than on v6.
+func (c *Client) isV5(ctx context.Context) (bool, error) {
+	inf, err := c.ControllerInfo(ctx)
+	if err != nil {
+		return false, err
+	}
+	return strings.HasPrefix(inf.ControllerVer, "5."), nil
+}

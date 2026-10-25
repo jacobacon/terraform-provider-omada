@@ -153,3 +153,55 @@ resource "omada_port_profile" "test" {
 		},
 	})
 }
+
+// TestAccPortProfileCreateMinimal creates a profile with only a name and a
+// native network on a v5 controller. The mock, like v5.15, refuses a create
+// missing poe, bandWidthCtrlType, spanningTreeEnable, portIsolationEnable or
+// loopbackDetectEnable, so this fails if the client stops defaulting them.
+func TestAccPortProfileCreateMinimal(t *testing.T) {
+	srv := newMockController(t, withV5Controller())
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testProviderConfig(srv.URL) + `
+resource "omada_port_profile" "iot" {
+  name              = "iot"
+  native_network_id = "net-1"
+}`,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrSet("omada_port_profile.iot", "id"),
+					resource.TestCheckResourceAttr("omada_port_profile.iot", "poe", "2"),
+					resource.TestCheckResourceAttr("omada_port_profile.iot", "spanning_tree_enable", "true"),
+				),
+			},
+		},
+	})
+}
+
+// TestAccPortProfileCreateMinimalV6 is the same create on a v6 controller,
+// which defaults those fields itself, so the client must not send them.
+func TestAccPortProfileCreateMinimalV6(t *testing.T) {
+	srv := newMockController(t)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testProviderConfig(srv.URL) + `
+resource "omada_port_profile" "iot" {
+  name              = "iot"
+  native_network_id = "net-1"
+}`,
+				Check: func(s *terraform.State) error {
+					id := s.RootModule().Resources["omada_port_profile.iot"].Primary.ID
+					if v, ok := rawStore(t, srv.URL, "profiles")[id]["poe"]; ok {
+						return fmt.Errorf("create sent poe=%v to a v6 controller", v)
+					}
+					return nil
+				},
+			},
+		},
+	})
+}

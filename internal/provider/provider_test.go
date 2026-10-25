@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	pathpkg "path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,17 +49,41 @@ func TestProviderSchema(t *testing.T) {
 	}
 }
 
+// mockOption changes newMockController's behaviour where controller versions
+// differ. The default is a v6 controller.
+type mockOption func(*mockConfig)
+
+type mockConfig struct {
+	// v5 makes the mock answer as a v5.15 controller: /api/info reports 5.15,
+	// the web-API port write accepts a whole port document, and a port profile
+	// create refuses the fields v6 would default.
+	v5 bool
+}
+
+func withV5Controller() mockOption {
+	return func(c *mockConfig) { c.v5 = true }
+}
+
 // newMockController returns an httptest server that emulates the Omada v6
 // info + login handshake plus the sites and networks list endpoints, so
 // acceptance tests run in CI without a real controller.
-func newMockController(t *testing.T) *httptest.Server {
+func newMockController(t *testing.T, opts ...mockOption) *httptest.Server {
 	t.Helper()
+
+	var cfg mockConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/api/info", func(w http.ResponseWriter, _ *http.Request) {
+		ver := "6.0.0"
+		if cfg.v5 {
+			ver = "5.15.24.19"
+		}
 		writeEnvelope(w, 0, "", map[string]any{
-			"omadacId": "abc123", "controllerVer": "6.0.0", "apiVer": "3", "type": 1,
+			"omadacId": "abc123", "controllerVer": ver, "apiVer": "3", "type": 1,
 		})
 	})
 
@@ -90,7 +115,7 @@ func newMockController(t *testing.T) *httptest.Server {
 	nextID := 1
 	networks := map[string]map[string]any{
 		"net-1": {
-			"id": "net-1", "name": "IoT", "purpose": "interface",
+			"id": "net-1", "name": "IoT", "purpose": "interface", "primary": false,
 			"vlan": 30, "vlanType": 0, "application": 0,
 			"gatewaySubnet": "192.168.30.1/24",
 			// per-VLAN switching/security toggles
@@ -111,6 +136,9 @@ func newMockController(t *testing.T) *httptest.Server {
 			},
 		},
 	}
+	// Port profiles, declared here because creating a VLAN network adds one.
+	profs := map[string]map[string]any{}
+	profNext := 1
 	const netBase = "/abc123/api/v2/sites/site-1/setting/lan/networks"
 
 	// Collection: GET (list) + POST (create).
@@ -169,6 +197,15 @@ func newMockController(t *testing.T) *httptest.Server {
 			in["allLan"] = true
 			in["primary"] = false
 			networks[id] = in
+			// On v5.15 the controller also creates a port profile of the same
+			// name carrying the VLAN untagged (flag 1), and deletes it with the
+			// network. A second profile of that name is refused (-33506).
+			pid := fmt.Sprintf("prof-%d", profNext)
+			profNext++
+			profs[pid] = map[string]any{
+				"id": pid, "name": in["name"], "flag": 1, "nativeNetworkId": id,
+				"tagNetworkIds": []string{}, "untagNetworkIds": []string{},
+			}
 			// The id comes back as a bare string, not an object.
 			writeEnvelope(w, 0, "Success.", id)
 		default: // GET
@@ -250,6 +287,11 @@ func newMockController(t *testing.T) *httptest.Server {
 		switch r.Method {
 		case http.MethodDelete:
 			delete(networks, id)
+			for pid, p := range profs {
+				if p["flag"] == 1 && p["nativeNetworkId"] == id {
+					delete(profs, pid)
+				}
+			}
 			writeEnvelope(w, 0, "", nil)
 		default: // PATCH
 			var in map[string]any
@@ -614,8 +656,6 @@ func newMockController(t *testing.T) *httptest.Server {
 	})
 
 	// Stateful port-profile store (POST create, GET list, PATCH /{id}, DELETE).
-	profs := map[string]map[string]any{}
-	profNext := 1
 	const profBase = "/abc123/api/v2/sites/site-1/setting/lan/profiles"
 	mux.HandleFunc(profBase, func(w http.ResponseWriter, r *http.Request) {
 		if !requireToken(w, r) {
@@ -627,6 +667,20 @@ func newMockController(t *testing.T) *httptest.Server {
 		case http.MethodPost:
 			var in map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&in)
+			// v5.15 refuses a create missing any of these with "-1001: must
+			// not be null" and no field name.
+			for _, k := range []string{"poe", "bandWidthCtrlType", "spanningTreeEnable", "portIsolationEnable", "loopbackDetectEnable"} {
+				if cfg.v5 && in[k] == nil {
+					writeEnvelope(w, -1001, "must not be null", nil)
+					return
+				}
+			}
+			for _, p := range profs {
+				if p["name"] == in["name"] {
+					writeEnvelope(w, -33506, "This Profile name already exists.", nil)
+					return
+				}
+			}
 			id := fmt.Sprintf("prof-%d", profNext)
 			profNext++
 			in["id"] = id
@@ -997,28 +1051,63 @@ func newMockController(t *testing.T) *httptest.Server {
 	})
 
 	// Devices list — result is a bare JSON array (no pagination envelope), like
-	// the real controller. Seeded with one switch and one AP.
+	// the real controller. Seeded with one switch and one AP, and stateful so
+	// a switch rename shows up on the next read.
+	devices := []map[string]any{
+		{"name": "SW-1", "type": "switch", "model": "ES205GP", "mac": "8C-86-DD-10-50-CA",
+			"sn": "225", "ip": "10.10.99.2", "status": 14, "statusCategory": 1,
+			"firmwareVersion": "1.0.6 Build 20260329", "version": "1.0.6",
+			"needUpgrade": false, "uptimeLong": 5656402, "clientNum": 0, "hwVersion": "1.0"},
+		{"name": "AP-1", "type": "ap", "model": "EAP610", "mac": "60-83-E7-4B-1B-40",
+			"sn": "226", "ip": "10.10.99.4", "status": 14, "statusCategory": 1,
+			"firmwareVersion": "1.2.3", "version": "1.2.3",
+			"needUpgrade": true, "uptimeLong": 1000, "clientNum": 7, "hwVersion": "1.0"},
+	}
+	// devicesDown makes the list fail, standing in for an outage.
+	devicesDown := false
 	mux.HandleFunc("/abc123/api/v2/sites/site-1/devices", func(w http.ResponseWriter, r *http.Request) {
 		if !requireToken(w, r) {
 			return
 		}
-		writeEnvelope(w, 0, "", []map[string]any{
-			{"name": "SW-1", "type": "switch", "model": "ES205GP", "mac": "8C-86-DD-10-50-CA",
-				"sn": "225", "ip": "10.10.99.2", "status": 14, "statusCategory": 1,
-				"firmwareVersion": "1.0.6 Build 20260329", "version": "1.0.6",
-				"needUpgrade": false, "uptimeLong": 5656402, "clientNum": 0, "hwVersion": "1.0"},
-			{"name": "AP-1", "type": "ap", "model": "EAP610", "mac": "60-83-E7-4B-1B-40",
-				"sn": "226", "ip": "10.10.99.4", "status": 14, "statusCategory": 1,
-				"firmwareVersion": "1.2.3", "version": "1.2.3",
-				"needUpgrade": true, "uptimeLong": 1000, "clientNum": 7, "hwVersion": "1.0"},
-		})
+		mu.Lock()
+		defer mu.Unlock()
+		if devicesDown {
+			writeEnvelope(w, -1, "General error", nil)
+			return
+		}
+		writeEnvelope(w, 0, "", devices)
+	})
+
+	// The switch's own document. PATCH is a partial update carrying only the
+	// name, as the UI sends it; anything else in the body is refused so a
+	// provider that started sending more would fail here.
+	mux.HandleFunc("/abc123/api/v2/sites/site-1/switches/8C-86-DD-10-50-CA", func(w http.ResponseWriter, r *http.Request) {
+		if !requireToken(w, r) {
+			return
+		}
+		if r.Method != http.MethodPatch {
+			writeEnvelope(w, -1600, "no such path", nil)
+			return
+		}
+		var in map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		name, ok := in["name"].(string)
+		if !ok || len(in) != 1 {
+			writeEnvelope(w, -1001, "General error", nil)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		devices[0]["name"] = name
+		writeEnvelope(w, 0, "", nil)
 	})
 
 	// Switch ports — the provider's one cross-surface object. The mock keeps
 	// both halves honest: the read is served on the web API, and the write is
 	// only accepted on the Open API with a bearer token from the grant below.
 	// A test that broke that split (say, by writing through the web API) would
-	// fail here rather than only against a real controller.
+	// fail here rather than only against a real controller. withV5Controller
+	// adds the v5.15 web-API write alongside it.
 	switchPorts := map[int]map[string]any{}
 	for i := 1; i <= 5; i++ {
 		switchPorts[i] = map[string]any{
@@ -1048,6 +1137,59 @@ func newMockController(t *testing.T) *httptest.Server {
 			out = append(out, switchPorts[i])
 		}
 		writeEnvelope(w, 0, "", out)
+	})
+
+	// The web API's per-port route. v6.2 has it but refuses every body with
+	// -1001 (DESIGN.md §5.5). v5.15 accepts the whole port document and
+	// refuses a partial one with the same "General error", so with
+	// withV5Controller the mock requires every key the read returned. A
+	// provider that sent only the modelled fields would reset PoE and the rest
+	// on real hardware.
+	mux.HandleFunc("/abc123/api/v2/sites/site-1/switches/8C-86-DD-10-50-CA/ports/", func(w http.ResponseWriter, r *http.Request) {
+		if !requireToken(w, r) {
+			return
+		}
+		if !cfg.v5 {
+			writeEnvelope(w, -1001, "General error", nil)
+			return
+		}
+		num, err := strconv.Atoi(pathpkg.Base(r.URL.Path))
+		if r.Method != http.MethodPatch || err != nil {
+			writeEnvelope(w, -1600, "no such path", nil)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		cur, ok := switchPorts[num]
+		if !ok {
+			writeEnvelope(w, -1600, "no such path", nil)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeEnvelope(w, -1001, "General error", nil)
+			return
+		}
+		for k := range cur {
+			if _, ok := body[k]; !ok {
+				writeEnvelope(w, -1001, "General error", nil)
+				return
+			}
+		}
+		// Like v5.15, an unknown profileId still succeeds but the port keeps
+		// its old profile.
+		if id := body["profileId"]; id != "prof-all" && id != "prof-main" {
+			body["profileId"] = cur["profileId"]
+		}
+		for k, v := range body {
+			cur[k] = v
+		}
+		if id, _ := cur["profileId"].(string); id == "prof-main" {
+			cur["profileName"] = "MAIN"
+		} else {
+			cur["profileName"] = "All"
+		}
+		writeEnvelope(w, 0, "", nil)
 	})
 
 	mux.HandleFunc("/openapi/authorize/token", func(w http.ResponseWriter, r *http.Request) {
@@ -2600,6 +2742,32 @@ func newMockController(t *testing.T) *httptest.Server {
 		mu.Lock()
 		defer mu.Unlock()
 		_ = json.NewEncoder(w).Encode(ssids)
+	})
+	// DELETE /debug/devices?mac=... removes a device from the site, and
+	// POST /debug/devices?down=true|false toggles the outage.
+	mux.HandleFunc("/debug/devices", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodDelete:
+			devices = slices.DeleteFunc(devices, func(d map[string]any) bool {
+				return d["mac"] == r.URL.Query().Get("mac")
+			})
+			return
+		case http.MethodPost:
+			devicesDown = r.URL.Query().Get("down") == "true"
+			return
+		}
+		byMAC := map[string]map[string]any{}
+		for _, d := range devices {
+			byMAC[d["mac"].(string)] = d
+		}
+		_ = json.NewEncoder(w).Encode(byMAC)
+	})
+	mux.HandleFunc("/debug/switchPorts", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = json.NewEncoder(w).Encode(switchPorts)
 	})
 	mux.HandleFunc("/debug/profiles", func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()

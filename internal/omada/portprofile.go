@@ -26,11 +26,16 @@ type STPSetting struct {
 }
 
 // PortProfile is a switch port profile. Verified against a live v6.2 controller
-// (/setting/lan/profiles). Read-only fields (flag, prohibitModify, resource,
-// networkConflict) are not modelled and are preserved on update.
+// (/setting/lan/profiles). Read-only fields (prohibitModify, resource,
+// networkConflict) are not modelled and are preserved on update; flag is read
+// but never written.
 type PortProfile struct {
-	ID                 string   `json:"id"`
-	Name               string   `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Flag says who made the profile: 0 for the built-ins (All, Default,
+	// Disable), 1 for the one the controller creates with each VLAN network,
+	// 2 for one made in the UI or through the API. Read-only.
+	Flag               int      `json:"flag"`
 	POE                int      `json:"poe"`
 	VLANConfigEnable   bool     `json:"vlanConfigEnable"`
 	NetworkTagsSetting int      `json:"networkTagsSetting"`
@@ -85,10 +90,37 @@ func (c *Client) GetPortProfile(ctx context.Context, siteID, id string) (*PortPr
 	return nil, fmt.Errorf("port profile %q not found on site %q", id, siteID)
 }
 
+// profileCreateDefaults are fields a v5.15 controller will not default on
+// create. Leaving any one out gets "-1001: must not be null", once per missing
+// field and without naming it; this set was narrowed down by elimination.
+//
+// The values match the built-in "Default" profile. They are only sent to a v5
+// controller, and only fill fields the caller left unset.
+var profileCreateDefaults = map[string]any{
+	"poe":                  2, // keep the device's own PoE setting
+	"bandWidthCtrlType":    0,
+	"spanningTreeEnable":   true,
+	"portIsolationEnable":  false,
+	"loopbackDetectEnable": false,
+}
+
 // CreatePortProfile creates a profile (null result → resolved by name).
 func (c *Client) CreatePortProfile(ctx context.Context, siteID string, fields map[string]any) (*PortProfile, error) {
 	name, _ := fields["name"].(string)
-	if err := c.Do(ctx, "POST", profilesPath(siteID), fields, nil); err != nil {
+	v5, err := c.isV5(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("creating port profile: %w", err)
+	}
+	body := make(map[string]any, len(fields)+len(profileCreateDefaults))
+	if v5 {
+		for k, v := range profileCreateDefaults {
+			body[k] = v
+		}
+	}
+	for k, v := range fields {
+		body[k] = v
+	}
+	if err := c.Do(ctx, "POST", profilesPath(siteID), body, nil); err != nil {
 		return nil, fmt.Errorf("creating port profile: %w", err)
 	}
 	profs, err := c.ListPortProfiles(ctx, siteID)

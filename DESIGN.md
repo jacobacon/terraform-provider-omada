@@ -277,7 +277,8 @@ Two shapes of Open API dependency have now appeared, and they are worth keeping
 apart because they fail differently:
 
 - **Write-only crossover** (`omada_switch_port`): the read is on the web API, so
-  a plan and a refresh work without credentials and only `apply` fails.
+  a plan and a refresh work without credentials and only `apply` fails. (On
+  v5.15 the write has a web-API fallback, §5.5.)
 - **Whole-document** (`omada_iot_radio`): `/setting/iot/radio` is served *only*
   under `/openapi/v1` — the web API answers `-1600` for the same path — so
   reading needs credentials too, and the failure appears on refresh. The
@@ -377,7 +378,7 @@ preserved via read-modify-write.
 | `omada_wlan_group` | CRUD | live | |
 | `omada_mdns_reflector` | CRUD | live | |
 | `omada_mdns_profile` | CRUD | live, see §5.3 | separate collection (`/setting/profiles/mdns`) from the reflector rules; controller caps custom profiles per site (5 on dev hardware), reported as `mdnsCustomMaxProfileNum` |
-| `omada_port_profile` | CRUD | live · subset | STP block deep-merged |
+| `omada_port_profile` | CRUD | live · subset | STP block deep-merged; on v5, create fills in five fields v5.15 will not leave null |
 | `omada_wireless_network` | CRUD | live · subset | `psk` write-only; `vlan_enable` needs `lan_network_id` — see §5.3 |
 | `omada_static_route` | CRUD | live | update is `PUT` (`PATCH` → `-1600`) |
 | `omada_portal` | CRUD | live · subset | write-only `password`; bare-array list; PATCH RMW |
@@ -407,6 +408,7 @@ preserved via read-modify-write.
 | `omada_site_settings` | R/U (singleton) | live · subset | ~45 fields; large object |
 | `omada_sites` (data) | R | live | |
 | `omada_networks` (data) | R | live | |
+| `omada_port_profiles` (data) | R | live (v5.15) | `origin` from the profile's `flag`: 0 built-in, 1 made with a VLAN network, 2 user |
 | `omada_wan` (data) | R | live | **read-only by design** — see §5.4 |
 | `omada_wan_ipv6` | CRUD (adopt-only) | **read live, writes inferred** | narrow exception to "Writable WAN" — see §5.3; models only `wanPortIpv6Setting`, leaves IPv4/MAC untouched |
 | `omada_port_forwards` (data) | R | mock | discovery — list rules + IDs |
@@ -623,7 +625,7 @@ Every configuration endpoint found on the controller, and where it stands.
 | `/setting/iot/radio` | ✅ `omada_iot_radio` — **Open API only** |
 | `/setting/iot/devices/config` | ⚠️ `omada_iot_beacon` — create/delete unverified (§5.1) |
 | `/setting/iot/servers` | ✅ `omada_iot_server` |
-| per-device configuration | ⚠️ `omada_switch_port`, `omada_gateway`, `omada_access_point` (§5.5) |
+| per-device configuration | ⚠️ `omada_switch_port`, `omada_switch`, `omada_gateway`, `omada_access_point` (§5.5) |
 
 Not found despite looking, and so presumably unsupported on this hardware or
 named unlike anything tried: DMZ, port triggering, multi-nets NAT, switch-side
@@ -894,6 +896,25 @@ gateway:
   default on destroy would make `terraform destroy` silently reconfigure live
   switching, using this provider's guess rather than the practitioner's — so
   Delete drops the resource from state and warns, and nothing is written.
+
+**v5.15 controllers accept the whole document on the web API.** On v5.15
+(confirmed with ES206X-M2 and ES210X-M2 switches) `PATCH .../ports/{port}`
+takes the full port document as read and still refuses any subset with
+`-1001 General error`. That breaks the allow-list rule above, so it is only a
+fallback: `UpdateSwitchPort` uses it when no Open API credentials are
+configured and the controller reports a 5.x version, reads the port as an
+untyped map, changes only the nine keys the Open API body carries, and sends
+the rest back as it was read. The read and the write are separate calls, so a
+UI edit made in between is lost. Any other version without credentials gets
+`ErrOpenAPINotConfigured` before anything is sent, as before, and an error
+from the v5 write is passed through as it came back. v5.15 answers an unknown
+`profileId` with success and keeps the old profile, so the port is read again
+after the write and a profile that didn't stick is an error.
+
+**A switch's own name is a partial update.** `PATCH /sites/{site}/switches/{mac}`
+with `{"name": …}` is what the UI sends to rename a switch, and nothing else on
+the device changes (confirmed on v5.15 with ES206X-M2 and ES210X-M2 switches).
+`omada_switch` models only that; its read comes from the device list.
 
 **The gateway turned out to be the easy one.** `PATCH /sites/{site}/gateways/{mac}`
 on the *web* API is a genuine partial update — a body with one key changes that
