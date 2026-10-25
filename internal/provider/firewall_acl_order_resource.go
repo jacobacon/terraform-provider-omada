@@ -200,7 +200,7 @@ func (r *firewallACLOrderResource) reorder(ctx context.Context, plan *firewallAC
 	}
 	ids, diags := stringSlice(ctx, plan.RuleIDs)
 	if diags.HasError() {
-		return omada.Site{}, 0, fmt.Errorf("unable to read rule_ids")
+		return omada.Site{}, 0, diagsError("reading rule_ids", diags)
 	}
 	if err := r.data.client.ReorderACLs(ctx, site.ID, aclType, ids); err != nil {
 		return omada.Site{}, 0, err
