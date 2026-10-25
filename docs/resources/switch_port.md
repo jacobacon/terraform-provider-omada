@@ -4,7 +4,7 @@ page_title: "omada_switch_port Resource - omada"
 subcategory: ""
 description: |-
   Manages the configuration of one physical port on an adopted switch.
-  ~> This resource needs Open API credentials (openapi_client_id / openapi_client_secret). The controller has no writable per-port route on its web API, so the write goes through the Open API while the read comes from the web API. The admin username and password alone are not enough, and the failure is at apply time, not plan.
+  ~> Writes prefer Open API credentials (openapi_client_id / openapi_client_secret). The read always comes from the web API. On v6.2 controllers the web API has no per-port write, so the admin username and password alone are not enough and the failure is at apply time, not plan. v5 controllers do have one, and without Open API credentials the provider uses it instead. That route only accepts the whole port document, so the write is a read-modify-write and can overwrite a UI change made at the same moment.
   ~> A port is physical: it cannot be created or destroyed. Terraform adopts an existing port here. Removing the resource from your configuration leaves the port exactly as it was last applied — Terraform forgets it, the switch does not. Reconfiguring the port a device is plugged into will interrupt that device's traffic, and reconfiguring an uplink can cut off everything behind it, including the switch itself.
   Every settable attribute is optional: whatever you leave out keeps its current value on the controller rather than being reset to a default. That makes it safe to manage just the name, or just the VLAN, on a port whose other settings you would rather not touch — but it also means an omitted attribute will never report drift.
 ---
@@ -13,7 +13,7 @@ description: |-
 
 Manages the configuration of one physical port on an adopted switch.
 
-~> **This resource needs Open API credentials** (`openapi_client_id` / `openapi_client_secret`). The controller has no writable per-port route on its web API, so the write goes through the Open API while the read comes from the web API. The admin username and password alone are not enough, and the failure is at apply time, not plan.
+~> **Writes prefer Open API credentials** (`openapi_client_id` / `openapi_client_secret`). The read always comes from the web API. On v6.2 controllers the web API has no per-port write, so the admin username and password alone are not enough and the failure is at apply time, not plan. v5 controllers do have one, and without Open API credentials the provider uses it instead. That route only accepts the whole port document, so the write is a read-modify-write and can overwrite a UI change made at the same moment.
 
 ~> **A port is physical: it cannot be created or destroyed.** Terraform *adopts* an existing port here. Removing the resource from your configuration leaves the port exactly as it was last applied — Terraform forgets it, the switch does not. Reconfiguring the port a device is plugged into will interrupt that device's traffic, and reconfiguring an uplink can cut off everything behind it, including the switch itself.
 

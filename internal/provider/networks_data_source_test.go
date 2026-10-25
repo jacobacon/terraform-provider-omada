@@ -28,6 +28,7 @@ func TestAccNetworksDataSource(t *testing.T) {
 					resource.TestCheckResourceAttr("data.omada_networks.test", "networks.0.vlan_id", "30"),
 					resource.TestCheckResourceAttr("data.omada_networks.test", "networks.0.gateway_subnet", "192.168.30.1/24"),
 					resource.TestCheckResourceAttr("data.omada_networks.test", "networks.0.dhcp_enabled", "true"),
+					resource.TestCheckResourceAttr("data.omada_networks.test", "networks.0.builtin", "false"),
 				),
 			},
 		},

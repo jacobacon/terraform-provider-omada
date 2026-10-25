@@ -102,6 +102,10 @@ type DHCPSettings struct {
 // Derived/read-only fields (ipRangeStart/End, ipRangePool, totalIpNum, state,
 // deviceMac, ...) are intentionally not modelled; UpdateNetwork preserves them.
 type Network struct {
+	// Primary is true on the controller's built-in Default network, which
+	// cannot be deleted. Read-only.
+	Primary bool `json:"primary"`
+
 	ID            string   `json:"id"`
 	Name          string   `json:"name"`
 	Purpose       string   `json:"purpose"` // "interface" | "vlan"

@@ -4,11 +4,13 @@
 package provider
 
 import (
+	"fmt"
 	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
 // TestAccSwitchPortResource drives adopt → import → update of omada_switch_port.
@@ -112,6 +114,66 @@ resource "omada_switch_port" "nas" {
   name       = "NAS"
 }`,
 				ExpectError: regexp.MustCompile(`Platform Integration -> Open API`),
+			},
+		},
+	})
+}
+
+// TestAccSwitchPortWebAPIWrite configures a port with only the admin
+// credentials on a controller that has the v5.15 web-API port write. The mock
+// refuses any body that is not the whole port document, and the check on poe
+// shows the unmodelled keys were sent back as they were read.
+func TestAccSwitchPortWebAPIWrite(t *testing.T) {
+	srv := newMockController(t, withV5Controller())
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testProviderConfig(srv.URL) + `
+resource "omada_switch_port" "nas" {
+  switch_mac = "8C-86-DD-10-50-CA"
+  port       = 4
+  name       = "NAS"
+  profile_id = "prof-main"
+}`,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("omada_switch_port.nas", "name", "NAS"),
+					resource.TestCheckResourceAttr("omada_switch_port.nas", "profile_id", "prof-main"),
+					resource.TestCheckResourceAttr("omada_switch_port.nas", "profile_name", "MAIN"),
+					resource.TestCheckResourceAttr("omada_switch_port.nas", "native_network_id", "net-1"),
+					func(*terraform.State) error {
+						port := rawStore(t, srv.URL, "switchPorts")["4"]
+						if port["poe"] != float64(1) || port["operation"] != "switching" {
+							return fmt.Errorf("unmodelled keys changed by the write: poe=%v operation=%v",
+								port["poe"], port["operation"])
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
+// TestAccSwitchPortWebAPIUnknownProfile sets a profile id the controller does
+// not have. v5.15 answers that with success and keeps the old profile, so the
+// provider has to catch it on the read-back.
+func TestAccSwitchPortWebAPIUnknownProfile(t *testing.T) {
+	srv := newMockController(t, withV5Controller())
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testProviderConfig(srv.URL) + `
+resource "omada_switch_port" "nas" {
+  switch_mac = "8C-86-DD-10-50-CA"
+  port       = 4
+  name       = "NAS"
+  profile_id = "prof-missing"
+}`,
+				ExpectError: regexp.MustCompile(`kept its old profile on port 4`),
 			},
 		},
 	})

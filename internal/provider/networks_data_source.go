@@ -31,6 +31,7 @@ type networkModel struct {
 	VLANID        types.Int64  `tfsdk:"vlan_id"`
 	GatewaySubnet types.String `tfsdk:"gateway_subnet"`
 	DHCPEnabled   types.Bool   `tfsdk:"dhcp_enabled"`
+	Builtin       types.Bool   `tfsdk:"builtin"`
 }
 
 type networksDataSourceModel struct {
@@ -67,6 +68,7 @@ func (d *networksDataSource) Schema(_ context.Context, _ datasource.SchemaReques
 						"vlan_id":        schema.Int64Attribute{Computed: true, MarkdownDescription: "The VLAN ID."},
 						"gateway_subnet": schema.StringAttribute{Computed: true, MarkdownDescription: "Gateway IP + subnet in CIDR notation."},
 						"dhcp_enabled":   schema.BoolAttribute{Computed: true, MarkdownDescription: "Whether DHCP is enabled on the network."},
+						"builtin":        schema.BoolAttribute{Computed: true, MarkdownDescription: "True for the controller's primary (Default) network, which cannot be deleted."},
 					},
 				},
 			},
@@ -118,6 +120,7 @@ func (d *networksDataSource) Read(ctx context.Context, req datasource.ReadReques
 			VLANID:        types.Int64Value(int64(n.VLANID)),
 			GatewaySubnet: types.StringValue(n.GatewaySubnet),
 			DHCPEnabled:   types.BoolValue(n.DHCPEnabled()),
+			Builtin:       types.BoolValue(n.Primary),
 		})
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)

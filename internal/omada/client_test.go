@@ -73,7 +73,7 @@ func newTestController(t *testing.T) *httptest.Server {
 			"currentPage": 1,
 			"currentSize": 100,
 			"data": []map[string]any{{
-				"id": "net-1", "name": "IoT", "purpose": "interface",
+				"id": "net-1", "name": "IoT", "purpose": "interface", "primary": true,
 				"vlan": 30, "gatewaySubnet": "192.168.30.1/24",
 				"dhcpSettings": map[string]any{"enable": true, "ipaddrStart": "192.168.30.2", "ipaddrEnd": "192.168.30.254", "leasetime": 120},
 			}},
@@ -135,7 +135,7 @@ func TestClientListNetworks(t *testing.T) {
 	}
 	n := nets[0]
 	if n.ID != "net-1" || n.Name != "IoT" || n.VLANID != 30 ||
-		n.GatewaySubnet != "192.168.30.1/24" || !n.DHCPEnabled() {
+		n.GatewaySubnet != "192.168.30.1/24" || !n.DHCPEnabled() || !n.Primary {
 		t.Fatalf("unexpected network: %+v", n)
 	}
 }

@@ -25,9 +25,15 @@ import (
 // as does /openapi/v1/.../switches and the paginated .../ports. Verified against
 // a live v6.2 controller.
 //
-// So the read comes from one surface and the write from the other. The practical
-// consequence for callers is that `omada_switch_port` needs Open API credentials
-// even though refreshing it does not.
+// So the read comes from one surface and the write from the other.
+//
+// v5.15 controllers differ: there the web API does have a per-port write,
+//
+//	PATCH /sites/{site}/switches/{mac}/ports/{port}
+//
+// verified with ES-series switches (ES206X-M2, ES210X-M2). It takes the whole
+// port document rather than a partial one, so it is only used as a fallback when
+// no Open API credentials are configured; see updateSwitchPortWebAPI.
 
 // SwitchPort is one physical port on an adopted switch.
 //
@@ -125,12 +131,23 @@ func (c *Client) GetSwitchPort(ctx context.Context, siteID, mac string, port int
 	return nil, fmt.Errorf("switch %s has no port %d (it has %d ports)", mac, port, len(ports))
 }
 
-// UpdateSwitchPort writes a port's configuration through the Open API.
+// UpdateSwitchPort writes a port's configuration through the Open API. Without
+// Open API credentials a v5 controller is written through the web API instead
+// (see updateSwitchPortWebAPI).
 //
-// Returns ErrOpenAPINotConfigured when no Open API credentials were supplied,
-// which is the common first failure — the admin username and password do not
-// reach this endpoint.
+// Anything else without credentials returns ErrOpenAPINotConfigured, which is
+// the common first failure — the admin username and password do not reach the
+// Open API, and v6.2 refuses the web-API port write.
 func (c *Client) UpdateSwitchPort(ctx context.Context, siteID, mac string, port int, p SwitchPort) error {
+	if !c.openAPIConfigured() {
+		v5, err := c.isV5(ctx)
+		if err != nil {
+			return fmt.Errorf("updating port %d on switch %s: %w", port, mac, err)
+		}
+		if v5 {
+			return c.updateSwitchPortWebAPI(ctx, siteID, mac, port, p)
+		}
+	}
 	body := switchPortUpdate{
 		Duplex:                    p.Duplex,
 		LinkSpeed:                 p.LinkSpeed,
@@ -145,6 +162,64 @@ func (c *Client) UpdateSwitchPort(ctx context.Context, siteID, mac string, port 
 	path := c.OpenAPIPath(siteID, fmt.Sprintf("/switches/%s/ports/%d", NormalizeMAC(mac), port))
 	if err := c.DoOpenAPI(ctx, "PATCH", path, body, nil); err != nil {
 		return fmt.Errorf("updating port %d on switch %s: %w", port, mac, err)
+	}
+	return nil
+}
+
+// updateSwitchPortWebAPI writes a port through the web API:
+//
+//	PATCH /sites/{site}/switches/{mac}/ports/{port}
+//
+// The route rejects a partial body with "General error", so this is a
+// read-modify-write: the port is fetched as an untyped map, only the fields this
+// provider models are overwritten, and everything else (PoE, storm control, QoS)
+// is sent back unchanged.
+//
+// A change made in the UI between the read and the write is lost. The Open API
+// PATCH has no such window, which is why it stays the preferred path.
+func (c *Client) updateSwitchPortWebAPI(ctx context.Context, siteID, mac string, port int, p SwitchPort) error {
+	var docs []map[string]any
+	if err := c.Do(ctx, "GET", switchPortsPath(siteID, mac), nil, &docs); err != nil {
+		return fmt.Errorf("reading ports on switch %s before writing port %d: %w", mac, port, err)
+	}
+
+	doc := portDoc(docs, port)
+	if doc == nil {
+		return fmt.Errorf("switch %s has no port %d (it has %d ports)", mac, port, len(docs))
+	}
+
+	doc["duplex"] = p.Duplex
+	doc["linkSpeed"] = p.LinkSpeed
+	doc["name"] = p.Name
+	doc["nativeNetworkId"] = p.NativeNetworkID
+	doc["networkTagsSetting"] = p.NetworkTagsSetting
+	doc["profileId"] = p.ProfileID
+	doc["profileOverrideEnable"] = p.ProfileOverrideEnable
+	doc["profileVlanOverrideEnable"] = p.ProfileVLANOverrideEnable
+	doc["tagIds"] = nilToEmptyStrings(p.TagIDs)
+
+	path := fmt.Sprintf("%s/%d", switchPortsPath(siteID, mac), port)
+	if err := c.Do(ctx, "PATCH", path, doc, nil); err != nil {
+		return fmt.Errorf("updating port %d on switch %s through the web API: %w", port, mac, err)
+	}
+
+	// v5.15 answers an unknown profileId with success and keeps the old
+	// profile, so check what it stored.
+	if err := c.Do(ctx, "GET", switchPortsPath(siteID, mac), nil, &docs); err != nil {
+		return fmt.Errorf("reading port %d on switch %s after writing it: %w", port, mac, err)
+	}
+	if got := portDoc(docs, port); got == nil || got["profileId"] != p.ProfileID {
+		return fmt.Errorf("switch %s kept its old profile on port %d; check that profile %q exists", mac, port, p.ProfileID)
+	}
+	return nil
+}
+
+// portDoc finds a port by number in the web API's port list.
+func portDoc(docs []map[string]any, port int) map[string]any {
+	for _, d := range docs {
+		if n, ok := d["port"].(float64); ok && int(n) == port {
+			return d
+		}
 	}
 	return nil
 }
