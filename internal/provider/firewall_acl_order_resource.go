@@ -168,7 +168,12 @@ func (r *firewallACLOrderResource) apply(ctx context.Context, site omada.Site, a
 			live = append(live, a)
 		}
 	}
-	sort.SliceStable(live, func(i, j int) bool { return live[i].Index < live[j].Index })
+	// Sorting equal or missing indexes would just echo the configured order
+	// back, hiding both a failed reorder and out-of-band drift.
+	if err := omada.CheckACLOrder(live); err != nil {
+		return err
+	}
+	sort.Slice(live, func(i, j int) bool { return live[i].Index < live[j].Index })
 
 	ids := make([]string, 0, len(live))
 	for _, a := range live {
@@ -176,16 +181,24 @@ func (r *firewallACLOrderResource) apply(ctx context.Context, site omada.Site, a
 	}
 	lv, d := stringListValue(ctx, ids)
 	if d.HasError() {
-		return fmt.Errorf("building rule_ids")
+		return diagsError("building rule_ids", d)
 	}
 	m.RuleIDs = lv
 	m.Site = types.StringValue(site.Name)
 	m.SiteID = types.StringValue(siteID)
-	if s, ok := aclTypeToStr[aclType]; ok {
-		m.Type = types.StringValue(s)
-	}
-	m.ID = types.StringValue(siteID + "/" + aclTypeToStr[aclType])
+	m.Type = types.StringValue(typeName)
+	m.ID = types.StringValue(siteID + "/" + typeName)
 	return nil
+}
+
+// diagsError folds framework diagnostics into an error so the underlying
+// detail reaches the user instead of a bare "could not read" message.
+func diagsError(what string, diags diag.Diagnostics) error {
+	msgs := make([]string, 0, len(diags.Errors()))
+	for _, e := range diags.Errors() {
+		msgs = append(msgs, e.Summary()+": "+e.Detail())
+	}
+	return fmt.Errorf("%s: %s", what, strings.Join(msgs, "; "))
 }
 
 // reorder is Create and Update: both just assert the configured order.
