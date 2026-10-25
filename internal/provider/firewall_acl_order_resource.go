@@ -70,7 +70,10 @@ func (r *firewallACLOrderResource) Schema(_ context.Context, _ resource.SchemaRe
 			"control of the order.\n\n" +
 			"One instance per site and ACL type. `rule_ids` is an order, not a set: changing it " +
 			"updates in place, and destroying the resource stops managing the order without " +
-			"changing it on the controller.",
+			"changing it on the controller.\n\n" +
+			"An ACL of the same type that is created or deleted in the same apply can shift the " +
+			"positions between reading and writing them; the controller then refuses the reorder " +
+			"without moving anything, and running apply again completes it.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "`<site_id>/<type>` — the order is a per-site, per-type singleton.",
