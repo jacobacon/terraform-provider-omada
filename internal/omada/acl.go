@@ -233,3 +233,27 @@ func (c *Client) ReorderACLs(ctx context.Context, siteID string, aclType int, or
 	}
 	return nil
 }
+
+// checkACLPositions rejects a sorted set of rule indexes that are not distinct
+// and 1-based. A list response without `index` decodes every rule to 0, which
+// would otherwise make any order look already applied: the write is skipped and
+// a reorder that never happened is reported as a success.
+func checkACLPositions(sorted []int) error {
+	for i, p := range sorted {
+		if p < 1 || (i > 0 && p == sorted[i-1]) {
+			return fmt.Errorf("controller reported invalid rule positions %v; expected distinct 1-based indexes", sorted)
+		}
+	}
+	return nil
+}
+
+// CheckACLOrder validates the Index of each rule in acls the same way
+// ReorderACLs does, for callers that read an order back.
+func CheckACLOrder(acls []ACL) error {
+	positions := make([]int, 0, len(acls))
+	for _, a := range acls {
+		positions = append(positions, a.Index)
+	}
+	sort.Ints(positions)
+	return checkACLPositions(positions)
+}
