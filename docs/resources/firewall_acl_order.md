@@ -6,6 +6,7 @@ description: |-
   Controls the evaluation order of firewall ACL rules. Omada evaluates gateway ACLs top to bottom and the first match wins, so a permit below a deny that also matches is dead. A created rule always appends to the end of the list, which makes that the default outcome.
   The listed rules are arranged into this relative order among the positions they already occupy. Rules at positions 2, 5 and 7 can be rearranged among 2, 5 and 7, and nothing else on the controller moves — so a config need not account for rules it does not manage. The flip side is that a rule cannot be moved past a rule that is not listed; to do that, list that rule too. Listing every rule of the type gives complete control of the order.
   One instance per site and ACL type. rule_ids is an order, not a set: changing it updates in place, and destroying the resource stops managing the order without changing it on the controller.
+  An ACL of the same type that is created or deleted in the same apply can shift the positions between reading and writing them; the controller then refuses the reorder without moving anything, and running apply again completes it.
 ---
 
 # omada_firewall_acl_order (Resource)
