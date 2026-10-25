@@ -146,9 +146,13 @@ func (r *firewallACLOrderResource) aclType(m firewallACLOrderModel) (int, bool) 
 // silent success.
 func (r *firewallACLOrderResource) apply(ctx context.Context, site omada.Site, aclType int, m *firewallACLOrderModel) error {
 	siteID := site.ID
+	typeName, ok := aclTypeToStr[aclType]
+	if !ok {
+		return fmt.Errorf("unknown acl type %d", aclType)
+	}
 	want, diags := stringSlice(ctx, m.RuleIDs)
 	if diags.HasError() {
-		return fmt.Errorf("reading rule_ids from state")
+		return diagsError("reading rule_ids", diags)
 	}
 	acls, err := r.data.client.ListACLs(ctx, siteID, aclType)
 	if err != nil {
